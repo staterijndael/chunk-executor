@@ -295,6 +295,7 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 					}
 
 					atomic.AddInt32(workDoneCounter, 1)
+					srcFile.Close()
 					continue
 				}
 
@@ -312,6 +313,25 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 
 					atomic.AddInt32(workDoneCounter, 1)
 					dstFile.Close()
+					srcFile.Close()
+					continue
+				}
+
+				_, err = s.ExecuteCmd("rm -rf " + outputDir)
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					dstFile.Close()
+					srcFile.Close()
 					continue
 				}
 
