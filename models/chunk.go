@@ -8,5 +8,5 @@ type Chunk struct {
 }
 
 type ChunksBase struct {
-	Chunks []*Chunk
+	Chunks []*Chunk `json:"chunks"`
 }

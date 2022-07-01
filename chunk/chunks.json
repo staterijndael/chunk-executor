@@ -1,10 +1,10 @@
 {
- "Chunks": [
+ "chunks": [
   {
    "chunk_id": 1,
    "params": {
     "records": "MX,A,NS",
-    "server": "77.88.8.1:53"
+    "server": "4.2.2.3:53"
    }
   }
  ]
