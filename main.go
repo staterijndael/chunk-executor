@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	config2 "chunk-executor/config"
+	"chunk-executor/models"
 	"encoding/json"
 	"fmt"
 	"github.com/BurntSushi/toml"
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,17 +22,18 @@ import (
 
 type ServerInstance struct {
 	Name         string
-	ChunkCh      chan *Chunk
+	ChunkCh      chan *models.Chunk
 	FreeChunks   int
 	FreeChunksMx sync.Mutex
-	Client       *ssh.Client
+	SSHClient    *ssh.Client
+	STFPClient   *sftp.Client
 	CurrentTask  int
 }
 
 func (s *ServerInstance) ExecuteCmd(command string) (string, error) {
 	var stdoutBuf bytes.Buffer
 
-	session, err := s.Client.NewSession()
+	session, err := s.SSHClient.NewSession()
 	if err != nil {
 		return "", err
 	}
@@ -45,17 +50,6 @@ func (s *ServerInstance) ExecuteCmd(command string) (string, error) {
 
 func (s *ServerInstance) GetLoadAverage() (string, error) {
 	return s.ExecuteCmd("uptime")
-}
-
-type Chunk struct {
-	ChunkID int `json:"chunk_id"`
-	X       int
-	Y       int
-	Z       string
-}
-
-type ChunksBase struct {
-	Chunks []*Chunk
 }
 
 func main() {
@@ -80,6 +74,11 @@ func main() {
 		if taskID > maxTaskID {
 			maxTaskID = taskID
 		}
+	}
+
+	err = os.Mkdir("outputs/"+strconv.Itoa(maxTaskID+1), os.ModePerm)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	logFile, err := os.Create("./logs/" + strconv.Itoa(maxTaskID+1) + ".txt")
@@ -111,10 +110,16 @@ func main() {
 				log.Panic("server " + servName + "panic: " + err.Error())
 			}
 
+			sc, err := sftp.NewClient(conn)
+			if err != nil {
+				log.Fatalf("Unable to start SFTP subsystem: %v", err)
+			}
+
 			serverInstance := &ServerInstance{
 				Name:         servName,
-				ChunkCh:      make(chan *Chunk),
-				Client:       conn,
+				ChunkCh:      make(chan *models.Chunk),
+				SSHClient:    conn,
+				STFPClient:   sc,
 				FreeChunks:   servCfg.MaxChunks,
 				FreeChunksMx: sync.Mutex{},
 				CurrentTask:  0,
@@ -141,15 +146,9 @@ func main() {
 			//	}
 			//}
 
-			_, err = serverInstance.ExecuteCmd("mkdir -p " + strconv.Itoa(maxTaskID+1) + " && cd " + strconv.Itoa(maxTaskID+1))
-			if err != nil {
-				logFile.Write([]byte(err.Error()))
-				log.Panic("server " + servName + "panic: " + err.Error())
-			}
-
 			serverInstance.CurrentTask = maxTaskID + 1
 
-			go serverInstance.startHandlingChunks(logFile, &workDoneCounter)
+			go serverInstance.startHandlingChunks(&config, logFile, &workDoneCounter)
 
 			serverMutex.Lock()
 			servers = append(servers, serverInstance)
@@ -159,7 +158,7 @@ func main() {
 
 	wg.Wait()
 
-	file, err := os.Open("./chunks.json")
+	file, err := os.Open("chunk/chunks.json")
 	if err != nil {
 		log.Panic(err.Error())
 	}
@@ -169,7 +168,7 @@ func main() {
 		log.Panic(err.Error())
 	}
 
-	var chunksBase ChunksBase
+	var chunksBase models.ChunksBase
 
 	err = json.Unmarshal(byteValue, &chunksBase)
 	if err != nil {
@@ -187,22 +186,51 @@ func main() {
 		}
 	}
 
-	for int(workDoneCounter) != len(chunksBase.Chunks) {
-		continue
-	}
+	workDoneCh := make(chan struct{})
+
+	go waitUntilWorkDone(&workDoneCounter, chunksBase.Chunks, workDoneCh)
+
+	<-workDoneCh
 
 	fmt.Println("work done!")
 }
 
-func (s *ServerInstance) startHandlingChunks(logFile *os.File, workDoneCounter *int32) {
+func waitUntilWorkDone(workDoneCounter *int32, chunks []*models.Chunk, workDoneCh chan<- struct{}) {
+	for int(*workDoneCounter) != len(chunks) {
+		continue
+	}
+
+	workDoneCh <- struct{}{}
+}
+
+func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os.File, workDoneCounter *int32) {
 	for i := 0; i < s.FreeChunks; i++ {
 		go func() {
 			for {
 				chunk := <-s.ChunkCh
 
-				command := fmt.Sprintf("«-x %v -y %v -z %v -outputdir ./{%v}/{%v}/ > ./{%v}/{%v}.log", chunk.X, chunk.Y, chunk.Z, s.CurrentTask, chunk.ChunkID, s.CurrentTask, chunk.ChunkID)
+				_, err := s.ExecuteCmd("mkdir -p " + strconv.Itoa(s.CurrentTask) + "/" + strconv.Itoa(chunk.ChunkID))
+				if err != nil {
+					log.Panic(err.Error())
+				}
 
-				output, err := s.ExecuteCmd(command)
+				params := make(map[string]string)
+				err = json.Unmarshal(chunk.Params, &params)
+				if err != nil {
+					log.Panic(err.Error())
+				}
+
+				paramsOrder := strings.Split(config.Binary.ParamsOrder, ",")
+				values := make([]interface{}, 0, len(paramsOrder))
+				for _, param := range paramsOrder {
+					values = append(values, params[param])
+				}
+
+				paramsArgsFilled := fmt.Sprintf(config.Binary.Params, values...)
+
+				command := fmt.Sprintf("echo '%v' | %v %v > %v/%v.log", config.Binary.Domain, config.Binary.BinaryPath, paramsArgsFilled, s.CurrentTask, chunk.ChunkID)
+
+				_, err = s.ExecuteCmd(command)
 				if err != nil {
 					LA, LaErr := s.GetLoadAverage()
 					if LaErr != nil {
@@ -217,12 +245,82 @@ func (s *ServerInstance) startHandlingChunks(logFile *os.File, workDoneCounter *
 					atomic.AddInt32(workDoneCounter, 1)
 					continue
 				}
+
+				outputFileName := strconv.Itoa(chunk.ChunkID) + ".log"
+				outputDir := strconv.Itoa(s.CurrentTask)
+				outputFileNameArchived := fmt.Sprintf("%v.log.tar.gz", chunk.ChunkID)
+
+				_, err = s.ExecuteCmd("cd " + outputDir + " && tar -zcvf " + outputFileNameArchived + " " + outputFileName + " && cd -")
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					continue
+				}
+
+				srcFile, err := s.STFPClient.OpenFile(outputDir+"/"+outputFileNameArchived, os.O_RDONLY)
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					continue
+				}
+
+				dstFile, err := os.Create("outputs/" + outputDir + "/" + outputFileNameArchived)
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					continue
+				}
+
+				_, err = io.Copy(dstFile, srcFile)
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					dstFile.Close()
+					continue
+				}
+
 				LA, err := s.GetLoadAverage()
 				if err != nil {
 					LA = err.Error()
 				}
 
-				_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), output, LA)))
+				_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), "SUCCESS", LA)))
 				if err != nil {
 					log.Panic(err.Error())
 				}
@@ -231,11 +329,13 @@ func (s *ServerInstance) startHandlingChunks(logFile *os.File, workDoneCounter *
 				s.FreeChunks++
 				s.FreeChunksMx.Unlock()
 				atomic.AddInt32(workDoneCounter, 1)
+				srcFile.Close()
+				dstFile.Close()
 			}
 		}()
 	}
 }
 
 func generateLogOutput(ChunkID int, Time time.Time, Message string, LoadAverage string) string {
-	return fmt.Sprintf("ChunkID: %v, Time: %v, Message: %v, LA: %v", ChunkID, Time.String(), Message, LoadAverage)
+	return fmt.Sprintf("ChunkID: %v, Time: %v, Status: %v, LA: %v", ChunkID, Time.String(), Message, LoadAverage)
 }

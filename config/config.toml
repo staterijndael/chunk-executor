@@ -1,6 +1,21 @@
+[binary]
+    binary_path="./resolver/resolver"
+    params="-server='%v' -records='%v'"
+    params_order="server,records"
+    domain="ya.ru"
 [servers]
     [servers.alpha]
         ip = "217.28.222.142"
         password = "Ze4u7Ri8AQ3O"
         user = "root"
         max_chunks = 5
+[dns]
+    hosts=[
+        "1.1.1.1:53", "1.0.0.1:53", # Cloudflare
+        "8.8.8.8:53", "8.8.4.4:53", # Google
+        "77.88.8.8:53", "77.88.8.1:53", # Yandex
+        "156.154.70.5:53", "156.154.71.5:53", # Neustar
+        "64.6.64.6:53", "64.6.65.6:53", # Verisign
+        "8.26.56.26:53", "8.20.247.20:53", # Comodo / NuSec
+        "4.2.2.1:53", "4.2.2.2:53", "4.2.2.3:53", "4.2.2.4:53", "4.2.2.5:53", "4.2.2.6:53",  ##Verizon
+    ]
