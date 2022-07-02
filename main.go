@@ -175,15 +175,18 @@ func main() {
 		log.Panic(err.Error())
 	}
 
+	var currentServerIndex int
+
 	for _, chunk := range chunksBase.Chunks {
-		for _, serverInstance := range servers {
-			serverInstance.FreeChunksMx.Lock()
-			if serverInstance.FreeChunks > 0 {
-				serverInstance.ChunkCh <- chunk
-				serverInstance.FreeChunks--
-			}
-			serverInstance.FreeChunksMx.Unlock()
+		currentServerIndex = currentServerIndex % len(servers)
+		serverInstance := servers[currentServerIndex]
+		serverInstance.FreeChunksMx.Lock()
+		if serverInstance.FreeChunks > 0 {
+			serverInstance.ChunkCh <- chunk
+			serverInstance.FreeChunks--
 		}
+		serverInstance.FreeChunksMx.Unlock()
+		currentServerIndex++
 	}
 
 	workDoneCh := make(chan struct{})

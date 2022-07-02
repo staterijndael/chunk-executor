@@ -2,10 +2,26 @@
  "chunks": [
   {
    "chunk_id": 1,
-   "file": "cat/domain1.txt",
+   "file": "cat/su-aa",
    "params": {
     "records": "MX,A,NS",
     "server": "4.2.2.3:53"
+   }
+  },
+  {
+   "chunk_id": 2,
+   "file": "cat/su-ab",
+   "params": {
+    "records": "MX,A,NS",
+    "server": "1.0.0.1:53"
+   }
+  },
+  {
+   "chunk_id": 3,
+   "file": "cat/su-ac",
+   "params": {
+    "records": "MX,A,NS",
+    "server": "1.1.1.1:53"
    }
   }
  ]

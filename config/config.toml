@@ -8,6 +8,16 @@
         password = ""
         user = "root"
         max_chunks = 5
+    [servers.beta]
+        ip = "217.28.222.143"
+        password = ""
+        user = "root"
+        max_chunks = 5
+    [servers.gamma]
+        ip = "217.28.222.141"
+        password = ""
+        user = "root"
+max_chunks = 5
 [dns]
     hosts=[
         "1.1.1.1:53", "1.0.0.1:53", # Cloudflare
