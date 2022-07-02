@@ -23,6 +23,7 @@ import (
 type ServerInstance struct {
 	Name         string
 	ChunkCh      chan *models.Chunk
+	ExitCh       chan struct{}
 	FreeChunks   int
 	FreeChunksMx sync.Mutex
 	SSHClient    *ssh.Client
@@ -94,6 +95,7 @@ func main() {
 	}
 
 	var workDoneCounter int32
+	var finishedCounter int32
 
 	servers := make([]*ServerInstance, 0, len(config.Servers))
 
@@ -125,6 +127,7 @@ func main() {
 			serverInstance := &ServerInstance{
 				Name:         servName,
 				ChunkCh:      make(chan *models.Chunk),
+				ExitCh:       make(chan struct{}),
 				SSHClient:    conn,
 				STFPClient:   sc,
 				FreeChunks:   servCfg.MaxChunks,
@@ -155,7 +158,7 @@ func main() {
 
 			serverInstance.CurrentTask = currentTaskID
 
-			go serverInstance.startHandlingChunks(&config, logFile, &workDoneCounter)
+			go serverInstance.startHandlingChunks(&config, logFile, &workDoneCounter, &finishedCounter)
 
 			serverMutex.Lock()
 			servers = append(servers, serverInstance)
@@ -202,6 +205,12 @@ func main() {
 
 	<-workDoneCh
 
+	finishedCh := make(chan struct{})
+
+	go waitUntilFinished(&finishedCounter, servers, finishedCh)
+
+	<-finishedCh
+
 	fmt.Println("work done!")
 }
 
@@ -213,224 +222,228 @@ func waitUntilWorkDone(workDoneCounter *int32, chunks []*models.Chunk, workDoneC
 	workDoneCh <- struct{}{}
 }
 
-func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os.File, workDoneCounter *int32) {
+func waitUntilFinished(finishedCounter *int32, servers []*ServerInstance, finishedCh chan<- struct{}) {
+	for _, server := range servers {
+		server.ExitCh <- struct{}{}
+	}
+
+	for int(*finishedCounter) != len(servers) {
+		continue
+	}
+
+	finishedCh <- struct{}{}
+}
+
+func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os.File, workDoneCounter *int32, finishedCounter *int32) {
 	for i := 0; i < s.FreeChunks; i++ {
 		go func() {
 			for {
-				chunk := <-s.ChunkCh
+				select {
+				case <-s.ExitCh:
+					outputDir := strconv.Itoa(s.CurrentTask)
 
-				_, err := s.ExecuteCmd("mkdir -p " + strconv.Itoa(s.CurrentTask) + "/" + strconv.Itoa(chunk.ChunkID))
-				if err != nil {
-					log.Panic(err.Error())
-				}
-
-				chunkFileNameSplits := strings.Split(chunk.File, "/")
-				chunkFileName := chunkFileNameSplits[len(chunkFileNameSplits)-1]
-
-				catFileLocal, err := os.Open(chunk.File)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
+					_, err := s.ExecuteCmd("rm -rf " + outputDir)
+					if err != nil {
+						log.Panic(err)
 					}
 
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					atomic.AddInt32(finishedCounter, 1)
+				case chunk := <-s.ChunkCh:
+					_, err := s.ExecuteCmd("mkdir -p " + strconv.Itoa(s.CurrentTask) + "/" + strconv.Itoa(chunk.ChunkID))
 					if err != nil {
 						log.Panic(err.Error())
 					}
 
-					atomic.AddInt32(workDoneCounter, 1)
-					continue
-				}
+					chunkFileNameSplits := strings.Split(chunk.File, "/")
+					chunkFileName := chunkFileNameSplits[len(chunkFileNameSplits)-1]
 
-				outputFileName := strconv.Itoa(chunk.ChunkID) + ".log"
-				outputDir := strconv.Itoa(s.CurrentTask)
-				outputFileNameArchived := fmt.Sprintf("%v.log.tar.gz", chunk.ChunkID)
+					catFileLocal, err := os.Open(chunk.File)
+					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
 
-				catFileRemote, err := s.STFPClient.Create(outputDir + "/" + chunkFileName)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						continue
 					}
 
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					outputFileName := strconv.Itoa(chunk.ChunkID) + ".log"
+					outputDir := strconv.Itoa(s.CurrentTask)
+					outputFileNameArchived := fmt.Sprintf("%v.log.tar.gz", chunk.ChunkID)
+
+					catFileRemote, err := s.STFPClient.Create(outputDir + "/" + chunkFileName)
+					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
+
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						catFileLocal.Close()
+						continue
+					}
+
+					_, err = io.Copy(catFileRemote, catFileLocal)
+					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
+
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						catFileLocal.Close()
+						catFileRemote.Close()
+						continue
+					}
+
+					params := make(map[string]string)
+					err = json.Unmarshal(chunk.Params, &params)
 					if err != nil {
 						log.Panic(err.Error())
 					}
 
-					atomic.AddInt32(workDoneCounter, 1)
-					catFileLocal.Close()
-					continue
-				}
-
-				_, err = io.Copy(catFileRemote, catFileLocal)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
+					paramsOrder := strings.Split(config.Binary.ParamsOrder, ",")
+					values := make([]interface{}, 0, len(paramsOrder))
+					for _, param := range paramsOrder {
+						values = append(values, params[param])
 					}
 
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					paramsArgsFilled := fmt.Sprintf(config.Binary.Params, values...)
+
+					command := fmt.Sprintf("cat '%v' | %v %v > %v/%v.log", outputDir+"/"+chunkFileName, config.Binary.BinaryPath, paramsArgsFilled, s.CurrentTask, chunk.ChunkID)
+
+					_, err = s.ExecuteCmd(command)
 					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
+
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						catFileLocal.Close()
+						catFileRemote.Close()
+						continue
+					}
+
+					_, err = s.ExecuteCmd("cd " + outputDir + " && tar -zcvf " + outputFileNameArchived + " " + outputFileName + " && cd -")
+					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
+
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						catFileLocal.Close()
+						catFileRemote.Close()
+						continue
+					}
+
+					srcFile, err := s.STFPClient.OpenFile(outputDir+"/"+outputFileNameArchived, os.O_RDONLY)
+					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
+
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						catFileLocal.Close()
+						catFileRemote.Close()
+						continue
+					}
+
+					dstFile, err := os.Create("outputs/" + outputDir + "/" + outputFileNameArchived)
+					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
+
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						srcFile.Close()
+						catFileLocal.Close()
+						catFileRemote.Close()
+						continue
+					}
+
+					_, err = io.Copy(dstFile, srcFile)
+					if err != nil {
+						LA, LaErr := s.GetLoadAverage()
+						if LaErr != nil {
+							LA = LaErr.Error()
+						}
+
+						_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+						if err != nil {
+							log.Panic(err.Error())
+						}
+
+						atomic.AddInt32(workDoneCounter, 1)
+						dstFile.Close()
+						srcFile.Close()
+						catFileLocal.Close()
+						catFileRemote.Close()
+						continue
+					}
+
+					LA, err := s.GetLoadAverage()
+					if err != nil {
+						LA = err.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), "SUCCESS", LA)))
+					if err != nil {
+						dstFile.Close()
+						srcFile.Close()
+						catFileLocal.Close()
+						catFileRemote.Close()
 						log.Panic(err.Error())
 					}
 
-					atomic.AddInt32(workDoneCounter, 1)
-					catFileLocal.Close()
-					catFileRemote.Close()
-					continue
-				}
-
-				params := make(map[string]string)
-				err = json.Unmarshal(chunk.Params, &params)
-				if err != nil {
-					log.Panic(err.Error())
-				}
-
-				paramsOrder := strings.Split(config.Binary.ParamsOrder, ",")
-				values := make([]interface{}, 0, len(paramsOrder))
-				for _, param := range paramsOrder {
-					values = append(values, params[param])
-				}
-
-				paramsArgsFilled := fmt.Sprintf(config.Binary.Params, values...)
-
-				command := fmt.Sprintf("cat '%v' | %v %v > %v/%v.log", outputDir+"/"+chunkFileName, config.Binary.BinaryPath, paramsArgsFilled, s.CurrentTask, chunk.ChunkID)
-
-				_, err = s.ExecuteCmd(command)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
-					}
-
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
-					if err != nil {
-						log.Panic(err.Error())
-					}
-
-					atomic.AddInt32(workDoneCounter, 1)
-					catFileLocal.Close()
-					catFileRemote.Close()
-					continue
-				}
-
-				_, err = s.ExecuteCmd("cd " + outputDir + " && tar -zcvf " + outputFileNameArchived + " " + outputFileName + " && cd -")
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
-					}
-
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
-					if err != nil {
-						log.Panic(err.Error())
-					}
-
-					atomic.AddInt32(workDoneCounter, 1)
-					catFileLocal.Close()
-					catFileRemote.Close()
-					continue
-				}
-
-				srcFile, err := s.STFPClient.OpenFile(outputDir+"/"+outputFileNameArchived, os.O_RDONLY)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
-					}
-
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
-					if err != nil {
-						log.Panic(err.Error())
-					}
-
-					atomic.AddInt32(workDoneCounter, 1)
-					catFileLocal.Close()
-					catFileRemote.Close()
-					continue
-				}
-
-				dstFile, err := os.Create("outputs/" + outputDir + "/" + outputFileNameArchived)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
-					}
-
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
-					if err != nil {
-						log.Panic(err.Error())
-					}
-
+					s.FreeChunksMx.Lock()
+					s.FreeChunks++
+					s.FreeChunksMx.Unlock()
 					atomic.AddInt32(workDoneCounter, 1)
 					srcFile.Close()
-					catFileLocal.Close()
-					catFileRemote.Close()
-					continue
-				}
-
-				_, err = io.Copy(dstFile, srcFile)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
-					}
-
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
-					if err != nil {
-						log.Panic(err.Error())
-					}
-
-					atomic.AddInt32(workDoneCounter, 1)
 					dstFile.Close()
-					srcFile.Close()
 					catFileLocal.Close()
 					catFileRemote.Close()
-					continue
 				}
-
-				_, err = s.ExecuteCmd("rm -rf " + outputDir)
-				if err != nil {
-					LA, LaErr := s.GetLoadAverage()
-					if LaErr != nil {
-						LA = LaErr.Error()
-					}
-
-					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
-					if err != nil {
-						log.Panic(err.Error())
-					}
-
-					atomic.AddInt32(workDoneCounter, 1)
-					dstFile.Close()
-					srcFile.Close()
-					catFileLocal.Close()
-					catFileRemote.Close()
-					continue
-				}
-
-				LA, err := s.GetLoadAverage()
-				if err != nil {
-					LA = err.Error()
-				}
-
-				_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), "SUCCESS", LA)))
-				if err != nil {
-					dstFile.Close()
-					srcFile.Close()
-					catFileLocal.Close()
-					catFileRemote.Close()
-					log.Panic(err.Error())
-				}
-
-				s.FreeChunksMx.Lock()
-				s.FreeChunks++
-				s.FreeChunksMx.Unlock()
-				atomic.AddInt32(workDoneCounter, 1)
-				srcFile.Close()
-				dstFile.Close()
 			}
 		}()
 	}
