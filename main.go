@@ -59,29 +59,36 @@ func main() {
 		return
 	}
 
-	files, err := ioutil.ReadDir("./logs")
+	systemLocalFile, err := os.Open("system-local.json")
+	if err != nil {
+		log.Panic(err.Error())
+	}
+
+	byteValueLocalFile, err := ioutil.ReadAll(systemLocalFile)
+	if err != nil {
+		log.Panic(err.Error())
+	}
+
+	var systemLocal models.SystemLocal
+
+	err = json.Unmarshal(byteValueLocalFile, &systemLocal)
+	if err != nil {
+		log.Panic(err.Error())
+	}
+
+	currentTaskID := systemLocal.LastTaskID + 1
+
+	systemLocal.LastTaskID++
+	outFile, _ := json.MarshalIndent(systemLocal, "", " ")
+
+	_ = ioutil.WriteFile("system-local.json", outFile, 0644)
+
+	err = os.Mkdir("outputs/"+strconv.Itoa(currentTaskID), os.ModePerm)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	var maxTaskID int
-	for _, file := range files {
-		taskID, err := strconv.Atoi(file.Name()[:len(file.Name())-4])
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		if taskID > maxTaskID {
-			maxTaskID = taskID
-		}
-	}
-
-	err = os.Mkdir("outputs/"+strconv.Itoa(maxTaskID+1), os.ModePerm)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	logFile, err := os.Create("./logs/" + strconv.Itoa(maxTaskID+1) + ".txt")
+	logFile, err := os.Create("./logs/" + strconv.Itoa(currentTaskID) + ".txt")
 	if err != nil {
 		log.Panic(err.Error())
 	}
@@ -146,7 +153,7 @@ func main() {
 			//	}
 			//}
 
-			serverInstance.CurrentTask = maxTaskID + 1
+			serverInstance.CurrentTask = currentTaskID
 
 			go serverInstance.startHandlingChunks(&config, logFile, &workDoneCounter)
 

@@ -5,17 +5,17 @@
 [servers]
     [servers.alpha]
         ip = "217.28.222.142"
-        password = ""
+        password = "Ze4u7Ri8AQ3O"
         user = "root"
         max_chunks = 5
     [servers.beta]
         ip = "217.28.222.143"
-        password = ""
+        password = "AG6tI2t5DXmx"
         user = "root"
         max_chunks = 5
     [servers.gamma]
         ip = "217.28.222.141"
-        password = ""
+        password = "FSibQCwY7X2j"
         user = "root"
 max_chunks = 5
 [dns]
