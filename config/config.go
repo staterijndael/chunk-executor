@@ -7,7 +7,6 @@ type Config struct {
 }
 
 type Binary struct {
-	Domain      string
 	BinaryPath  string `toml:"binary_path"`
 	Params      string
 	ParamsOrder string `toml:"params_order"`

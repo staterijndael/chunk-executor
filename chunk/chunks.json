@@ -2,6 +2,7 @@
  "chunks": [
   {
    "chunk_id": 1,
+   "file": "cat/domain1.txt",
    "params": {
     "records": "MX,A,NS",
     "server": "4.2.2.3:53"

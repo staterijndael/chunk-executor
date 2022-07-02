@@ -214,23 +214,10 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 					log.Panic(err.Error())
 				}
 
-				params := make(map[string]string)
-				err = json.Unmarshal(chunk.Params, &params)
-				if err != nil {
-					log.Panic(err.Error())
-				}
+				chunkFileNameSplits := strings.Split(chunk.File, "/")
+				chunkFileName := chunkFileNameSplits[len(chunkFileNameSplits)-1]
 
-				paramsOrder := strings.Split(config.Binary.ParamsOrder, ",")
-				values := make([]interface{}, 0, len(paramsOrder))
-				for _, param := range paramsOrder {
-					values = append(values, params[param])
-				}
-
-				paramsArgsFilled := fmt.Sprintf(config.Binary.Params, values...)
-
-				command := fmt.Sprintf("echo '%v' | %v %v > %v/%v.log", config.Binary.Domain, config.Binary.BinaryPath, paramsArgsFilled, s.CurrentTask, chunk.ChunkID)
-
-				_, err = s.ExecuteCmd(command)
+				catFileLocal, err := os.Open(chunk.File)
 				if err != nil {
 					LA, LaErr := s.GetLoadAverage()
 					if LaErr != nil {
@@ -250,6 +237,75 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 				outputDir := strconv.Itoa(s.CurrentTask)
 				outputFileNameArchived := fmt.Sprintf("%v.log.tar.gz", chunk.ChunkID)
 
+				catFileRemote, err := s.STFPClient.Create(outputDir + "/" + chunkFileName)
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					catFileLocal.Close()
+					continue
+				}
+
+				_, err = io.Copy(catFileRemote, catFileLocal)
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					catFileLocal.Close()
+					catFileRemote.Close()
+					continue
+				}
+
+				params := make(map[string]string)
+				err = json.Unmarshal(chunk.Params, &params)
+				if err != nil {
+					log.Panic(err.Error())
+				}
+
+				paramsOrder := strings.Split(config.Binary.ParamsOrder, ",")
+				values := make([]interface{}, 0, len(paramsOrder))
+				for _, param := range paramsOrder {
+					values = append(values, params[param])
+				}
+
+				paramsArgsFilled := fmt.Sprintf(config.Binary.Params, values...)
+
+				command := fmt.Sprintf("echo '%v' | %v %v > %v/%v.log", outputDir+"/"+chunkFileName, config.Binary.BinaryPath, paramsArgsFilled, s.CurrentTask, chunk.ChunkID)
+
+				_, err = s.ExecuteCmd(command)
+				if err != nil {
+					LA, LaErr := s.GetLoadAverage()
+					if LaErr != nil {
+						LA = LaErr.Error()
+					}
+
+					_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), err.Error(), LA)))
+					if err != nil {
+						log.Panic(err.Error())
+					}
+
+					atomic.AddInt32(workDoneCounter, 1)
+					catFileLocal.Close()
+					catFileRemote.Close()
+					continue
+				}
+
 				_, err = s.ExecuteCmd("cd " + outputDir + " && tar -zcvf " + outputFileNameArchived + " " + outputFileName + " && cd -")
 				if err != nil {
 					LA, LaErr := s.GetLoadAverage()
@@ -263,6 +319,8 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 					}
 
 					atomic.AddInt32(workDoneCounter, 1)
+					catFileLocal.Close()
+					catFileRemote.Close()
 					continue
 				}
 
@@ -279,6 +337,8 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 					}
 
 					atomic.AddInt32(workDoneCounter, 1)
+					catFileLocal.Close()
+					catFileRemote.Close()
 					continue
 				}
 
@@ -296,6 +356,8 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 
 					atomic.AddInt32(workDoneCounter, 1)
 					srcFile.Close()
+					catFileLocal.Close()
+					catFileRemote.Close()
 					continue
 				}
 
@@ -314,6 +376,8 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 					atomic.AddInt32(workDoneCounter, 1)
 					dstFile.Close()
 					srcFile.Close()
+					catFileLocal.Close()
+					catFileRemote.Close()
 					continue
 				}
 
@@ -332,6 +396,8 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 					atomic.AddInt32(workDoneCounter, 1)
 					dstFile.Close()
 					srcFile.Close()
+					catFileLocal.Close()
+					catFileRemote.Close()
 					continue
 				}
 
@@ -342,6 +408,10 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 
 				_, err = logFile.Write([]byte(generateLogOutput(chunk.ChunkID, time.Now(), "SUCCESS", LA)))
 				if err != nil {
+					dstFile.Close()
+					srcFile.Close()
+					catFileLocal.Close()
+					catFileRemote.Close()
 					log.Panic(err.Error())
 				}
 

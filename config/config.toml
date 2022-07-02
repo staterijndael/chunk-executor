@@ -2,11 +2,10 @@
     binary_path="./resolver/resolver"
     params="-server='%v' -records='%v'"
     params_order="server,records"
-    domain="ya.ru"
 [servers]
     [servers.alpha]
         ip = "217.28.222.142"
-        password = "Ze4u7Ri8AQ3O"
+        password = ""
         user = "root"
         max_chunks = 5
 [dns]
