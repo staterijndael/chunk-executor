@@ -286,7 +286,7 @@ func (s *ServerInstance) startHandlingChunks(config *config2.Config, logFile *os
 
 				paramsArgsFilled := fmt.Sprintf(config.Binary.Params, values...)
 
-				command := fmt.Sprintf("echo '%v' | %v %v > %v/%v.log", outputDir+"/"+chunkFileName, config.Binary.BinaryPath, paramsArgsFilled, s.CurrentTask, chunk.ChunkID)
+				command := fmt.Sprintf("cat '%v' | %v %v > %v/%v.log", outputDir+"/"+chunkFileName, config.Binary.BinaryPath, paramsArgsFilled, s.CurrentTask, chunk.ChunkID)
 
 				_, err = s.ExecuteCmd(command)
 				if err != nil {
